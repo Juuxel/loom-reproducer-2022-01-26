@@ -1,72 +1,112 @@
 plugins {
-	id 'fabric-loom' version '0.11-SNAPSHOT'
-	id 'maven-publish'
+	id 'fabric-loom' version '0.11-SNAPSHOT' apply false
 }
 
-sourceCompatibility = JavaVersion.VERSION_17
-targetCompatibility = JavaVersion.VERSION_17
+subprojects {
+	apply plugin: 'fabric-loom'
 
-archivesBaseName = project.archives_base_name
-version = project.mod_version
-group = project.maven_group
+	sourceCompatibility = JavaVersion.VERSION_17
+	targetCompatibility = JavaVersion.VERSION_17
 
-repositories {
-	// Add repositories to retrieve artifacts from in here.
-	// You should only use this when depending on other mods because
-	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
-	// for more information about repositories.
-}
+	archivesBaseName = rootProject.archives_base_name
+	version = rootProject.mod_version
+	group = rootProject.maven_group
 
-dependencies {
-	// To change the versions see the gradle.properties file
-	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-
-	// Fabric API. This is technically optional, but you probably want it anyway.
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-}
-
-processResources {
-	inputs.property "version", project.version
-
-	filesMatching("fabric.mod.json") {
-		expand "version": project.version
+	dependencies {
+		// To change the versions see the gradle.properties file
+		minecraft "com.mojang:minecraft:${project.minecraft_version}"
+		mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+		modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	}
-}
 
-tasks.withType(JavaCompile).configureEach {
-	// Minecraft 1.18 (1.18-pre2) upwards uses Java 17.
-	it.options.release = 17
-}
+	processResources {
+		inputs.property "version", project.version
 
-java {
-	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-	// if it is present.
-	// If you remove this line, sources will not be generated.
-	withSourcesJar()
-}
-
-jar {
-	from("LICENSE") {
-		rename { "${it}_${project.archivesBaseName}"}
-	}
-}
-
-// configure the maven publication
-publishing {
-	publications {
-		mavenJava(MavenPublication) {
-			from components.java
+		filesMatching("fabric.mod.json") {
+			expand "version": project.version
 		}
 	}
 
-	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
-	repositories {
-		// Add repositories to publish to here.
-		// Notice: This block does NOT have the same function as the block in the top level.
-		// The repositories here will be used for publishing your artifact, not for
-		// retrieving dependencies.
+	tasks.withType(JavaCompile).configureEach {
+		// Minecraft 1.18 (1.18-pre2) upwards uses Java 17.
+		it.options.release = 17
+	}
+
+	task checkOutput {
+		dependsOn jar
+		dependsOn remapJar
+
+		doFirst {
+			def remappedJar = remapJar.archiveFile
+			def taskOutput = project.file('output.txt')
+			def runtimeFile = project.file('runtime.txt')
+			runtimeFile.delete()
+
+			// Phase 1, check that the class file is found in the jar
+			boolean failed = false
+			boolean found = true
+
+			try (def zip = new java.util.zip.ZipFile(remappedJar.get().asFile)) {
+				if (zip.getEntry("test/HelloWorld.class") == null) {
+					found = false
+				}
+			}
+
+			if (!found) {
+				try (def zip = new java.util.zip.ZipFile(jar.archiveFile.get().asFile)) {
+					if (zip.getEntry("test/HelloWorld.class") != null) {
+						taskOutput.text = "Could not find class file in remapped jar but is in dev jar?!"
+						failed = true
+					}
+				}
+			}
+
+			if (!failed) {
+				try {
+					javaexec {
+						mainClass = 'test.HelloWorld'
+						classpath remappedJar
+						args runtimeFile.absolutePath
+					}.rethrowFailure()
+				} catch (Exception e) {
+					try (def pw = new PrintWriter(taskOutput)) {
+						e.printStackTrace(pw)
+					}
+
+					failed = true
+				}
+			}
+
+			// Phase 3, check that the file contents are as expected
+			if (!failed) {
+				def text = runtimeFile.text
+
+				if (!text.contains(project.name)) {
+					taskOutput.text = "In $project.name, found file from '$text'"
+				}
+			}
+		}
 	}
 }
+
+task checkOutput {
+	dependsOn subprojects.collect { it.tasks.checkOutput }
+
+	doLast {
+		def errors = []
+
+		subprojects.each {
+			def output = it.file('output.txt')
+
+			if (output.exists()) {
+				errors += it.name + ": " + output.text
+			}
+		}
+
+		if (!errors.isEmpty()) {
+			throw new RuntimeException(String.join('\n', errors))
+		}
+	}
+}
+
+check.dependsOn checkOutput
